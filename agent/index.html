@@ -1,0 +1,116 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charlie · ClearView At-Home</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { margin-bottom: 4px; }
+  .note { color: #666; font-size: 14px; margin-top: 0; }
+  button { font-size: 16px; padding: 10px 18px; border-radius: 8px; border: 0; cursor: pointer; background: #1a1a1a; color: #fff; }
+  button:disabled { opacity: .4; cursor: default; }
+  #end { background: #c0392b; }
+  #status { margin: 16px 0; font-weight: 600; min-height: 24px; }
+  #log { border: 1px solid #ddd; border-radius: 8px; padding: 12px; min-height: 220px; max-height: 360px; overflow-y: auto; }
+  .msg { margin: 8px 0; }
+  .who { font-weight: 700; }
+  .row { display: flex; gap: 8px; margin-top: 12px; }
+  input { flex: 1; font-size: 16px; padding: 10px; border: 1px solid #ccc; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1>ClearView At-Home</h1>
+<p class="note">AI voice agent demo (fictional brand). Calls may be recorded. Please don't share real personal details.</p>
+
+<button id="start">Start call</button>
+<button id="end" disabled>End call</button>
+<div id="status"></div>
+<div id="log"></div>
+
+<div class="row">
+  <input id="typed" placeholder="Or type your reply here">
+  <button id="send" disabled>Send</button>
+</div>
+
+<script>
+let sid = null, active = false, rec = null;
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const $ = id => document.getElementById(id);
+
+function status(t) { $("status").textContent = t; }
+function add(who, text) {
+  const d = document.createElement("div");
+  d.className = "msg";
+  d.innerHTML = '<span class="who">' + who + ':</span> ';
+  d.appendChild(document.createTextNode(text));
+  $("log").appendChild(d);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+function speak(text) {
+  return new Promise(res => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "en-IN";
+    u.onend = res; u.onerror = res;
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  });
+}
+
+async function reply(text) {
+  add("Charlie", text);
+  status("Speaking...");
+  await speak(text);
+  if (active) listen();
+}
+
+async function send(text) {
+  if (!text || !sid) return;
+  if (rec) { try { rec.abort(); } catch (e) {} }
+  add("You", text);
+  status("Thinking...");
+  const r = await fetch("/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+                                   body: JSON.stringify({ session_id: sid, text }) });
+  const d = await r.json();
+  await reply(d.reply);
+}
+
+function listen() {
+  if (!SR) { status("Voice input needs Chrome. You can type below."); return; }
+  rec = new SR();
+  rec.lang = "en-IN";
+  rec.interimResults = false;
+  rec.onresult = e => send(e.results[0][0].transcript);
+  rec.onerror = e => {
+    if (e.error === "no-speech" && active) { listen(); return; }
+    if (e.error !== "aborted") status("Didn't catch that (" + e.error + "). Type below or say it again.");
+  };
+  status("Listening...");
+  try { rec.start(); } catch (e) {}
+}
+
+$("start").onclick = async () => {
+  $("log").innerHTML = "";
+  active = true;
+  $("start").disabled = true; $("end").disabled = false; $("send").disabled = false;
+  status("Connecting...");
+  const r = await fetch("/start", { method: "POST" });
+  const d = await r.json();
+  sid = d.session_id;
+  await reply(d.reply);
+};
+
+$("end").onclick = () => {
+  active = false; sid = null;
+  if (rec) { try { rec.abort(); } catch (e) {} }
+  speechSynthesis.cancel();
+  $("start").disabled = false; $("end").disabled = true; $("send").disabled = true;
+  status("Call ended.");
+};
+
+$("send").onclick = () => { const t = $("typed").value.trim(); $("typed").value = ""; send(t); };
+$("typed").addEventListener("keydown", e => { if (e.key === "Enter") $("send").click(); });
+</script>
+</body>
+</html>
