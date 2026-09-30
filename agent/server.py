@@ -108,7 +108,6 @@ class Session:
     QUESTIONS = {
         "service": "Would you like a home eye test or a frame trial?",
         "pincode": "What is your 6-digit pincode?",
-        "pincode_confirm": "I heard {pincode}. Is that correct?",
         "address": "Please share your house or flat number and a nearby landmark.",
         "date": "Which date would you prefer? Please say today, tomorrow, or a weekday.",
         "name": "May I have your name?",
@@ -138,7 +137,26 @@ class Session:
             self.stage = "date"
             return "I do not have a slot on that date. Which other date would you prefer?"
         self.stage = "slot"
+        return self.slot_prompt()
+
+    def slot_prompt(self):
         return "I have " + ", ".join(slot["time"] for slot in self.slots) + ". Which one would you prefer?"
+
+    def reset_from(self, field):
+        """Rewind only the details made invalid by an explicit correction."""
+        if field == "pincode":
+            self.pincode = self.city = self.area = self.address = self.booking_date = self.time = None
+            self.slots, self.stage = [], "pincode"
+        elif field == "address":
+            self.address = self.booking_date = self.time = None
+            self.slots, self.stage = [], "address"
+        elif field == "date":
+            self.booking_date = self.time = None
+            self.slots, self.stage = [], "date"
+        elif field == "slot":
+            self.time, self.stage = None, "slot"
+            return "Sure. " + self.slot_prompt()
+        return "Sure. " + self.ask()
 
     def book(self):
         payload = {"call_id": self.call_id, "name": self.name, "phone": self.phone,
@@ -167,6 +185,15 @@ class Session:
             return "A team member will call you back. Thank you for calling ClearView."
         if self.stage == "complete":
             return "This call has ended. Please start a new call if you need help."
+        if any(word in lower for word in ("change", "update", "edit", "different")):
+            if "pincode" in lower or "pin code" in lower:
+                return self.reset_from("pincode")
+            if "address" in lower or "flat" in lower or "house" in lower:
+                return self.reset_from("address")
+            if "date" in lower or "day" in lower:
+                return self.reset_from("date")
+            if "slot" in lower or "time" in lower:
+                return self.reset_from("slot")
         if self.stage == "service":
             text = interpret("service: home eye test or frame trial", text)
             lower = text.lower()
@@ -182,25 +209,18 @@ class Session:
             candidate = digits(text)
             if len(candidate) != 6:
                 return "I need a 6-digit pincode. Please say it one digit at a time."
-            self.pincode, self.stage = candidate, "pincode_confirm"
-            return self.ask()
-        if self.stage == "pincode_confirm":
-            if lower in {"yes", "yeah", "yep", "correct", "right"}:
-                try:
-                    result = business.serviceability(self.pincode)
-                except Exception:
-                    return "I cannot check serviceability right now. Please try again shortly."
-                log(self.call_id, "pincode_captured")
-                if result.get("serviceable"):
-                    self.city, self.area, self.stage = result["city"], result["area"], "address"
-                    log(self.call_id, "serviceable")
-                    return f"Yes, we serve {self.area}, {self.city}. {self.ask()}"
-                self.stage = "waitlist_offer"
-                return "Sorry, we do not serve that area yet. " + self.ask()
-            if lower in {"no", "nope", "wrong", "incorrect"}:
-                self.pincode, self.stage = None, "pincode"
-                return self.ask()
-            return "Please say yes if the pincode is correct, or no to enter it again."
+            self.pincode = candidate
+            try:
+                result = business.serviceability(self.pincode)
+            except Exception:
+                return "I cannot check serviceability right now. Please try again shortly."
+            log(self.call_id, "pincode_captured")
+            if result.get("serviceable"):
+                self.city, self.area, self.stage = result["city"], result["area"], "address"
+                log(self.call_id, "serviceable")
+                return f"Yes, we serve {self.area}, {self.city}. {self.ask()}"
+            self.stage = "waitlist_offer"
+            return "Sorry, we do not serve that area yet. " + self.ask()
         if self.stage == "address":
             text = interpret("house or flat number and landmark", text)
             if len(text) < 5:
@@ -250,7 +270,8 @@ class Session:
                 except Exception:
                     return "I cannot save the waitlist request right now. Please try again shortly."
             self.stage = "confirm"
-            return f"To confirm: {self.service} at {self.address}, {self.area}, {self.city}, on {self.booking_date} at {self.time}, for {self.name}. {self.ask()}"
+            return (f"To confirm: {self.service} at {self.address}, {self.area}, {self.city}, on {self.booking_date} at {self.time}, for {self.name}. "
+                    "Say confirm, or say change address, pincode, date, or slot.")
         if self.stage == "confirm":
             if lower in {"yes", "yeah", "yep", "confirm", "correct"}:
                 try:

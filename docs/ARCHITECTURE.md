@@ -33,8 +33,7 @@ sequenceDiagram
 flowchart TD
     S[POST /start<br/>Create call session] --> Q1[Ask: service]
     Q1 -->|Caller answer → Qwen extracts service| Q2[Ask: 6-digit pincode]
-    Q2 -->|Validate six digits locally| Q3[Ask: confirm pincode]
-    Q3 -->|Yes| Serviceability[GET /serviceability/:pincode]
+    Q2 -->|Validate six digits locally| Serviceability[GET /serviceability/:pincode]
     Serviceability -->|serviceable: true| Address[Ask: address and landmark]
     Serviceability -->|serviceable: false| WaitlistOffer[Ask: join waitlist?]
     WaitlistOffer -->|Yes| WaitlistName[Ask: name]
@@ -58,14 +57,13 @@ flowchart TD
 | Current state | Caller provides | Qwen's narrow job | Local rule | Business API call | Charlie's next response |
 |---|---|---|---|---|---|
 | `service` | Home eye test or frame trial | Normalize service intent | Must match one of the two services | None | Ask for pincode |
-| `pincode` | Six-digit pincode | None | Remove spaces; require exactly six digits | None | Read it back and ask for confirmation |
-| `pincode_confirm` | Yes or no | None | Only yes proceeds | `GET /serviceability/{pincode}` on yes | Ask for address if serviceable; otherwise offer waitlist |
+| `pincode` | Six-digit pincode | None | Remove spaces; require exactly six digits | `GET /serviceability/{pincode}` | Ask for address if serviceable; otherwise offer waitlist |
 | `address` | Flat/house and landmark | Extract address only | Minimum five characters | None | Ask for date |
 | `date` | Today, tomorrow, weekday or ISO date | Normalize a natural date | Must resolve to `YYYY-MM-DD` | `GET /slots?pincode=&date=` | Offer only the returned slots |
 | `slot` | One offered time | None | Must equal a slot returned for this call | None | Ask for name |
 | `name` | Name | Extract name only | Cannot be only digits | None | Ask for phone |
 | `phone` | Ten-digit phone | None | Require exactly ten digits | None | Read summary and ask for confirmation |
-| `confirm` | Yes or no | None | Only yes books | `POST /book` on yes | Speak booking ID; no ends or returns to date |
+| `confirm` | Confirm, or an explicit correction | None | A correction rewinds only affected details | `POST /book` on confirm | Speak booking ID; or ask only the changed field |
 | `waitlist_offer` | Yes or no | None | Explicit consent required | None | Ask for name or end call |
 | `waitlist_phone` | Ten-digit phone | None | Require exactly ten digits | `POST /waitlist` | Confirm waitlist registration and end |
 
