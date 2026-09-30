@@ -60,7 +60,7 @@ flowchart TD
 | `pincode` | Six-digit pincode | None | Remove spaces; require exactly six digits | `GET /serviceability/{pincode}` | Ask for address if serviceable; otherwise offer waitlist |
 | `address` | Flat/house and landmark | Extract address only | Minimum five characters | None | Ask for date |
 | `date` | Today, tomorrow, weekday or ISO date | Normalize a natural date | Must resolve to `YYYY-MM-DD` | `GET /slots?pincode=&date=` | Offer only the returned slots |
-| `slot` | One offered time | None | Must equal a slot returned for this call | None | Ask for name |
+| `slot` | One offered time or an availability concern | Semantically classify slot choice vs. needing another date | A selected time must equal a slot returned for this call | None | Ask for name, or return to date selection |
 | `name` | Name | Extract name only | Cannot be only digits | None | Ask for phone |
 | `phone` | Ten-digit phone | None | Require exactly ten digits | None | Read summary and ask for confirmation |
 | `confirm` | Confirm, or an explicit correction | None | A correction rewinds only affected details | `POST /book` on confirm | Speak booking ID; or ask only the changed field |
@@ -85,7 +85,7 @@ flowchart TD
 |---|---|---|
 | Chrome Speech Recognition | Voice to text | Advance a booking state |
 | Browser Speech Synthesis | Speak Charlie's fixed reply | Create or modify booking data |
-| Qwen 2.5 through Ollama | Extract the value for the current field, e.g. address or natural-language date | Decide the flow, ask a question, invent an appointment field or call an API |
+| Qwen 2.5 through Ollama | Extract the current field and semantically classify bounded intents, e.g. “my evening is packed” means another date | Decide unrestricted flow, invent an appointment field or call an API |
 | FastAPI agent server | Hold session state, validate input, choose next fixed question, invoke permitted backend API | Trust an unvalidated model output |
 | FastAPI business backend | Serviceability, slots, booking, waitlist and event endpoints | Manage conversation state |
 | SQLite | Persist mock service areas, slots, bookings, waitlist and events | Talk directly to caller or model |

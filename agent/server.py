@@ -92,16 +92,41 @@ def interpret(field, text):
         "do not add an explanation, and do not infer values that were not said. "
         f"Requested field: {field}. Caller answer: {text!r}"
     )
+    result = model_json("You are a strict field extractor.", prompt, 60)
+    return result.get("value", text).strip() if isinstance(result.get("value", text), str) else text
+
+
+def model_json(system, prompt, max_tokens=100):
+    """Ask the configured model for a constrained JSON decision, with a safe fallback."""
+    if os.getenv("VERCEL") and "LLM_ENDPOINT" not in os.environ:
+        return {}
     try:
         headers = {"Authorization": f"Bearer {LLM_API_KEY}"} if LLM_API_KEY else {}
         response = httpx.post(LLM, headers=headers, json={"model": MODEL, "messages": [
-            {"role": "system", "content": "You are a strict field extractor."},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt},
-        ], "max_tokens": 60}, timeout=20).json()
-        content = response["choices"][0]["message"].get("content", "")
-        return json.loads(content).get("value", text).strip() or text
+        ], "max_tokens": max_tokens, "temperature": 0}, timeout=20).json()
+        content = response["choices"][0]["message"].get("content", "").strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*|\s*```$", "", content)
+        return json.loads(content)
     except (httpx.HTTPError, KeyError, ValueError, TypeError):
-        return text
+        return {}
+
+
+def slot_intent(text, slots):
+    """Use the LLM for semantic interpretation of availability, not keyword matching."""
+    offered = [slot["time"] for slot in slots]
+    prompt = (
+        "The customer is choosing from these appointment times: " + json.dumps(offered) + ". "
+        "Classify their reply as exactly one intent: select_slot, needs_another_date, or unclear. "
+        "Use needs_another_date for any meaning that they cannot attend the offered times, even if they do not say those exact words. "
+        "If selecting a listed slot, set time to that exact HH:MM value; otherwise use null. "
+        "Return JSON only: {\"intent\": \"...\", \"time\": \"HH:MM or null\"}. "
+        f"Customer reply: {text!r}"
+    )
+    result = model_json("You classify appointment-selection intent. Never invent a slot.", prompt)
+    return result if isinstance(result, dict) else {}
 
 
 class Session:
@@ -248,8 +273,15 @@ class Session:
             return self.ask()
         if self.stage == "slot":
             compact = lower.replace(" ", "")
-            self.time = next((s["time"] for s in self.slots if s["time"] in text or s["time"].split(":")[0] + "pm" in compact or s["time"].split(":")[0] + "am" in compact), None)
+            semantic = slot_intent(text, self.slots)
+            semantic_time = semantic.get("time") if semantic.get("intent") == "select_slot" else None
+            self.time = next((s["time"] for s in self.slots if s["time"] == semantic_time), None)
+            # The short fallback still works when a hosted model is unavailable.
+            self.time = self.time or next((s["time"] for s in self.slots if s["time"] in text or s["time"].split(":")[0] + "pm" in compact or s["time"].split(":")[0] + "am" in compact), None)
             if not self.time:
+                if semantic.get("intent") == "needs_another_date":
+                    self.stage = "date"
+                    return "I understand. Those are the only slots I have that day. Which other date would work for you?"
                 unable = ("not available", "not free", "can't", "cannot", "won't work", "why", "different day", "another day")
                 if any(phrase in lower for phrase in unable):
                     self.stage = "date"
