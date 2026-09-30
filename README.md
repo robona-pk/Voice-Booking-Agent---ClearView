@@ -82,7 +82,7 @@ source .venv/bin/activate
 uvicorn agent.server:app --port 8001
 ```
 
-Open http://localhost:8001/phone in Chrome and press the green call button. Serviceable test pincodes: `560034`, `560001`, `110001`, `400001`, `122001`. Use `999999` to test the waitlist.
+Open http://localhost:8001/phone in Chrome and press the green call button. Serviceable test pincodes: `560001`, `560008`, `560034`, `110001`, `400001`, `122001`. Use `999999` to test the waitlist.
 
 ## Deploying to Vercel
 

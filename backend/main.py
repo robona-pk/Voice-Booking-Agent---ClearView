@@ -28,7 +28,7 @@ def init():
     CREATE TABLE IF NOT EXISTS call_events(id INTEGER PRIMARY KEY, call_id TEXT, step TEXT, ts TEXT);
     CREATE TABLE IF NOT EXISTS calls(call_id TEXT PRIMARY KEY, transcript TEXT, outcome TEXT, duration_s REAL, created_at TEXT);
     """)
-    pins = [("560001", "Bengaluru", "MG Road"), ("560034", "Bengaluru", "Koramangala"),
+    pins = [("560001", "Bengaluru", "MG Road"), ("560008", "Bengaluru", "H.A.L. II Stage"), ("560034", "Bengaluru", "Koramangala"),
             ("110001", "Delhi", "Connaught Place"), ("400001", "Mumbai", "Fort"),
             ("122001", "Gurugram", "Sector 14")]
     con.executemany("INSERT OR IGNORE INTO pincodes VALUES(?,?,?)", pins)

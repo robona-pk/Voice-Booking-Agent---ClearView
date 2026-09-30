@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import date, timedelta
 con = sqlite3.connect("app.db")
-pins = [("560001","Bengaluru","MG Road"),("560034","Bengaluru","Koramangala"),
+pins = [("560001","Bengaluru","MG Road"),("560008","Bengaluru","H.A.L. II Stage"),("560034","Bengaluru","Koramangala"),
         ("110001","Delhi","Connaught Place"),("400001","Mumbai","Fort"),("122001","Gurugram","Sector 14")]
 con.executemany("INSERT OR IGNORE INTO pincodes VALUES(?,?,?)", pins)
 for p,_,_ in pins:
@@ -11,4 +11,3 @@ for p,_,_ in pins:
             con.execute("INSERT INTO slots(pincode,date,time) VALUES(?,?,?)", (p, day, t))
 con.commit()
 print("Seeded.")
-
