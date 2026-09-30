@@ -48,7 +48,11 @@ def serviceability(pincode: str):
 
 @app.get("/slots")
 def slots(pincode: str, date: str):
-    rows = q("SELECT id,time FROM slots WHERE pincode=? AND date=? AND booked=0 ORDER BY time LIMIT 3", (pincode, date))
+    # Show a spread across the day, including an after-work option, rather than
+    # returning only the first three morning/afternoon rows.
+    rows = q("""SELECT id,time FROM slots WHERE pincode=? AND date=? AND booked=0
+                ORDER BY CASE time WHEN '10:00' THEN 1 WHEN '14:00' THEN 2 WHEN '18:00' THEN 3 ELSE 4 END
+                LIMIT 3""", (pincode, date))
     return {"slots": [dict(r) for r in rows]}
 
 class Booking(BaseModel):

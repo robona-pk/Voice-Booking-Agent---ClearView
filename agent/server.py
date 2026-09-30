@@ -250,7 +250,15 @@ class Session:
             compact = lower.replace(" ", "")
             self.time = next((s["time"] for s in self.slots if s["time"] in text or s["time"].split(":")[0] + "pm" in compact or s["time"].split(":")[0] + "am" in compact), None)
             if not self.time:
-                return "Please choose one of the times I offered."
+                unable = ("not available", "not free", "can't", "cannot", "won't work", "why", "different day", "another day")
+                if any(phrase in lower for phrase in unable):
+                    self.stage = "date"
+                    return "I understand. Those are the only slots I have that day. Which other date would work for you?"
+                requested_time = re.search(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm)\b", lower)
+                if requested_time:
+                    self.stage = "date"
+                    return f"I do not have {requested_time.group(0)} that day. Which other date would work for you?"
+                return "You can choose one of those times, or say that you need a different date."
             self.stage = "name"
             return self.ask()
         if self.stage in {"name", "waitlist_name"}:
