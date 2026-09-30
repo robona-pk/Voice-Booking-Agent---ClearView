@@ -20,19 +20,25 @@ In-app booking funnels leak at address entry and slot selection. Many users (old
 6. Offers up to 3 available slots
 7. Confirms the details, books the appointment and returns a booking ID
 
+## Documentation
+
+- [Technology flowchart and responsibilities](docs/ARCHITECTURE.md)
+- [Brief API reference](docs/API.md)
+
 ## How it's built
 
 | Layer | Tech |
 |---|---|
-| LLM | Qwen 2.5 (3B), run locally with Ollama |
-| Agent server | FastAPI with tool calling |
+| LLM / NLU | Qwen 2.5 (3B) in Ollama; extracts the current expected answer only |
+| Conversation control | Deterministic finite-state machine in FastAPI |
+| Agent server | FastAPI session and validation layer |
 | Business backend | FastAPI + SQLite (pincodes, slots, bookings, waitlist, funnel events) |
 | Voice | Browser speech recognition and synthesis (Chrome) |
 | Interface | Phone-style web page |
 
 ## Product decisions worth noting
 
-- **Guardrails in code, not just the prompt.** The small model kept skipping steps: it jumped to the waitlist for serviceable pincodes and invented a pincode nobody had spoken. I fixed this by tracking conversation state in code, rejecting tool calls that don't match it, and injecting the current state into every turn. This is deterministic rules around a probabilistic model.
+- **The booking order lives in code.** A finite-state machine owns the conversation: service, pincode, confirmation, address, date, slot, name, phone and final confirmation. Charlie can collect only the current field and asks only one question at a time.
 - **Input validation for voice.** Pincodes must be 6 digits, and spoken input like "560 034" is normalised before the lookup.
 - **Funnel events logged at every step**, so drop-off can be measured.
 - **Waitlist as a growth signal.** Requests from unserviceable pincodes show where to expand.
@@ -77,6 +83,22 @@ uvicorn agent.server:app --port 8001
 ```
 
 Open http://localhost:8001/phone in Chrome and press the green call button. Serviceable test pincodes: `560034`, `560001`, `110001`, `400001`, `122001`. Use `999999` to test the waitlist.
+
+## Deploying to Vercel
+
+`pyproject.toml` explicitly selects `agent.server:app` as the single FastAPI entrypoint. The business endpoints are mounted beneath `/api`, so Vercel does not need to discover two separate apps.
+
+The Vercel demo uses SQLite in `/tmp`, which is temporary and can reset when a function is restarted. It is suitable for a demo, not real booking data. Local Ollama also cannot run on Vercel; set a hosted OpenAI-compatible `LLM_ENDPOINT` environment variable to use the optional answer-normalisation layer in deployment. The state-machine flow works without it.
+
+For a hosted provider, set these Vercel environment variables (never prefix them with `NEXT_PUBLIC_`):
+
+```text
+LLM_ENDPOINT=https://<provider's OpenAI-compatible host>/v1/chat/completions
+LLM_MODEL=<a small, current model ID from that provider>
+LLM_API_KEY=<provider API key>
+```
+
+The model is used only to normalize the one expected caller answer. All booking order, validation, and API permissions remain in the server-side state machine.
 
 ## What's next
 

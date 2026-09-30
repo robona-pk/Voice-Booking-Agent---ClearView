@@ -1,9 +1,12 @@
+import os
 import sqlite3, uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-DB = "app.db"
+# Vercel functions can write only to /tmp. The database is demo-only there and
+# may reset on a cold start; production needs a managed database.
+DB = os.getenv("CLEARVIEW_DB", "/tmp/clearview.db" if os.getenv("VERCEL") else "app.db")
 app = FastAPI()
 
 def q(sql, args=(), one=False, commit=False):
@@ -24,7 +27,17 @@ def init():
     CREATE TABLE IF NOT EXISTS waitlist(id INTEGER PRIMARY KEY, name TEXT, phone TEXT, pincode TEXT, created_at TEXT);
     CREATE TABLE IF NOT EXISTS call_events(id INTEGER PRIMARY KEY, call_id TEXT, step TEXT, ts TEXT);
     CREATE TABLE IF NOT EXISTS calls(call_id TEXT PRIMARY KEY, transcript TEXT, outcome TEXT, duration_s REAL, created_at TEXT);
-    """); con.commit(); con.close()
+    """)
+    pins = [("560001", "Bengaluru", "MG Road"), ("560034", "Bengaluru", "Koramangala"),
+            ("110001", "Delhi", "Connaught Place"), ("400001", "Mumbai", "Fort"),
+            ("122001", "Gurugram", "Sector 14")]
+    con.executemany("INSERT OR IGNORE INTO pincodes VALUES(?,?,?)", pins)
+    for pincode, _, _ in pins:
+        if con.execute("SELECT COUNT(*) FROM slots WHERE pincode=?", (pincode,)).fetchone()[0] == 0:
+            for offset in range(1, 8):
+                for time in ["10:00", "12:00", "14:00", "16:00", "18:00"]:
+                    con.execute("INSERT INTO slots(pincode,date,time) VALUES(?,?,?)", (pincode, (date.today() + timedelta(days=offset)).isoformat(), time))
+    con.commit(); con.close()
 init()
 
 @app.get("/serviceability/{pincode}")
@@ -68,4 +81,3 @@ class Event(BaseModel):
 def event(e: Event):
     q("INSERT INTO call_events(call_id,step,ts) VALUES(?,?,?)", (e.call_id, e.step, datetime.now().isoformat()), commit=True)
     return {"ok": True}
-

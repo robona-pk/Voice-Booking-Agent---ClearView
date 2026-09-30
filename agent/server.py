@@ -1,164 +1,265 @@
-import json, re, uuid, traceback, httpx
-from datetime import date
+"""ClearView's booking flow is state-machine controlled, not prompt controlled."""
+import json
+import os
+import re
+import uuid
+from datetime import date, timedelta
+
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+from backend import main as business
 
-API = "http://localhost:8000"
-LLM = "http://localhost:11434/v1/chat/completions"
-MODEL = "qwen2.5:3b-instruct"
-
+LLM = os.getenv("LLM_ENDPOINT", "http://localhost:11434/v1/chat/completions")
+MODEL = os.getenv("LLM_MODEL", "qwen2.5:3b-instruct")
+LLM_API_KEY = os.getenv("LLM_API_KEY")
 app = FastAPI()
+# Keep the business endpoints available for inspection under one public app.
+app.mount("/api", business.app)
 sessions = {}
 
-def build_system():
-    today = date.today()
-    return open("agent/prompt.md").read().replace(
-        "{today}", f"{today.strftime('%A, %d %B %Y')} ({today.isoformat()})")
+
+def digits(value):
+    return re.sub(r"\D", "", str(value))
+
 
 def log(call_id, step):
-    httpx.post(f"{API}/event", json={"call_id": call_id, "step": step})
+    """Call the business layer in-process so the deployed app has no localhost dependency."""
+    try:
+        business.event(business.Event(call_id=call_id, step=step))
+    except Exception:
+        pass
 
-def digits(s):
-    return re.sub(r"\D", "", str(s))
+
+def parse_date(text):
+    text = text.lower().strip()
+    match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
+    if match:
+        return match.group(1)
+    if text == "today":
+        return date.today().isoformat()
+    if text == "tomorrow":
+        return (date.today() + timedelta(days=1)).isoformat()
+    days = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+            "friday": 4, "saturday": 5, "sunday": 6}
+    for label, weekday in days.items():
+        if label in text:
+            offset = (weekday - date.today().weekday()) % 7
+            return (date.today() + timedelta(days=offset or 7 if "next" in text else offset)).isoformat()
+    return None
+
+
+def interpret(field, text):
+    """Use Qwen only to normalize the current answer, never to choose the next step.
+
+    This makes natural answers such as "Friday" or a spoken address easier to
+    process, while the state machine still validates all values and controls all
+    customer-facing questions.
+    """
+    # Vercel cannot run a local Ollama daemon. It keeps the deterministic flow
+    # working with raw input unless a hosted compatible LLM_ENDPOINT is supplied.
+    if os.getenv("VERCEL") and "LLM_ENDPOINT" not in os.environ:
+        return text
+    prompt = (
+        "Extract only the value for the requested field from a caller's answer. "
+        "Return JSON only, in the form {\"value\": \"...\"}. Do not ask a question, "
+        "do not add an explanation, and do not infer values that were not said. "
+        f"Requested field: {field}. Caller answer: {text!r}"
+    )
+    try:
+        headers = {"Authorization": f"Bearer {LLM_API_KEY}"} if LLM_API_KEY else {}
+        response = httpx.post(LLM, headers=headers, json={"model": MODEL, "messages": [
+            {"role": "system", "content": "You are a strict field extractor."},
+            {"role": "user", "content": prompt},
+        ], "max_tokens": 60}, timeout=20).json()
+        content = response["choices"][0]["message"].get("content", "")
+        return json.loads(content).get("value", text).strip() or text
+    except (httpx.HTTPError, KeyError, ValueError, TypeError):
+        return text
+
 
 class Session:
+    QUESTIONS = {
+        "service": "Would you like a home eye test or a frame trial?",
+        "pincode": "What is your 6-digit pincode?",
+        "pincode_confirm": "I heard {pincode}. Is that correct?",
+        "address": "Please share your house or flat number and a nearby landmark.",
+        "date": "Which date would you prefer? Please say today, tomorrow, or a weekday.",
+        "name": "May I have your name?",
+        "phone": "What is your 10-digit mobile number?",
+        "waitlist_name": "May I have your name for the waitlist?",
+        "waitlist_phone": "What is your 10-digit mobile number?",
+        "waitlist_offer": "Would you like to join the waitlist?",
+        "confirm": "Shall I confirm this appointment?",
+    }
+
     def __init__(self):
         self.call_id = uuid.uuid4().hex[:8]
-        self.base_system = build_system()
-        self.serviceable = {}      # pincode -> True/False (only after a real check)
-        self.spoken = []           # digits from each thing the caller said
-        self.last_pin = None
-        self.city = None
-        self.service = None
-        self.messages = [{"role": "system", "content": self.base_system},
-                         {"role": "user", "content": "(call connected)"}]
+        self.stage = "service"
+        self.service = self.pincode = self.city = self.area = None
+        self.address = self.booking_date = self.name = self.phone = self.time = None
+        self.slots = []
         log(self.call_id, "call_started")
 
-    def state_hint(self):
-        if self.service is None:
-            return ("The caller has NOT chosen a service yet. Do NOT call any tool. "
-                    "Ask only: 'Would you like a home eye test or a frame trial?'")
-        if self.last_pin is None:
-            return (f"Service chosen: {self.service}. No pincode collected yet. Do NOT call any tool "
-                    "until the caller says a 6-digit pincode. Ask: 'What is your 6-digit pincode?'")
-        if self.serviceable.get(self.last_pin):
-            return (f"Service: {self.service}. Pincode {self.last_pin} ({self.city}) is serviceable. "
-                    "Never use join_waitlist. Collect in order: address, preferred date "
-                    "(then call get_slots), name and phone, then confirm and call book_appointment.")
-        return (f"Pincode {self.last_pin} is NOT serviceable. Apologise, offer the waitlist, "
-                "collect name and phone, then call join_waitlist.")
+    def ask(self):
+        return self.QUESTIONS[self.stage].format(pincode=self.pincode)
 
-    def check_serviceability(self, pincode):
-        pincode = digits(pincode)
-        if len(pincode) != 6:
-            return {"error": "Pincode must be exactly 6 digits. Ask the caller for their pincode."}
-        if not any(pincode in d for d in self.spoken):
-            return {"error": "The caller has NOT given this pincode. Do not guess. Ask: 'What is your 6-digit pincode?'"}
-        r = httpx.get(f"{API}/serviceability/{pincode}").json()
-        self.serviceable[pincode] = bool(r.get("serviceable"))
-        self.last_pin = pincode
-        self.city = r.get("city")
-        log(self.call_id, "pincode_captured")
-        if r.get("serviceable"):
-            log(self.call_id, "serviceable")
-            r["next_step"] = "Serviceable. Do NOT use the waitlist. Ask for house/flat number and landmark, then the preferred date."
-        else:
-            r["next_step"] = "Not serviceable. Apologise and offer the waitlist."
-        return r
-
-    def get_slots(self, pincode, date):
-        pincode = digits(pincode)
-        if not self.serviceable.get(pincode):
-            return {"error": "Pincode has not been checked as serviceable. Ask for the pincode first."}
-        r = httpx.get(f"{API}/slots", params={"pincode": pincode, "date": date}).json()
+    def offer_slots(self):
+        result = business.slots(pincode=self.pincode, date=self.booking_date)
+        self.slots = result.get("slots", [])
         log(self.call_id, "slots_offered")
-        return r
+        if not self.slots:
+            self.stage = "date"
+            return "I do not have a slot on that date. Which other date would you prefer?"
+        self.stage = "slot"
+        return "I have " + ", ".join(slot["time"] for slot in self.slots) + ". Which one would you prefer?"
 
-    def book_appointment(self, **kw):
-        kw["pincode"] = digits(kw.get("pincode", ""))
-        if not self.serviceable.get(kw["pincode"]):
-            return {"error": "Pincode has not been checked as serviceable. Ask for the pincode first."}
-        r = httpx.post(f"{API}/book", json={**kw, "call_id": self.call_id}).json()
-        if r.get("success"): log(self.call_id, "booked")
-        return r
+    def book(self):
+        payload = {"call_id": self.call_id, "name": self.name, "phone": self.phone,
+                   "service": self.service, "pincode": self.pincode, "address": self.address,
+                   "date": self.booking_date, "time": self.time}
+        result = business.book(business.Booking(**payload))
+        if result.get("success"):
+            log(self.call_id, "booked")
+            self.stage = "complete"
+            return f"Your appointment is confirmed. Your booking ID is {result['booking_id']}. Thank you for calling ClearView."
+        self.stage = "date"
+        return "That slot was just taken. Which other date would you prefer?"
 
-    def join_waitlist(self, **kw):
-        kw["pincode"] = digits(kw.get("pincode", ""))
-        if self.serviceable.get(kw["pincode"]) is not False:
-            return {"error": "Only waitlist a pincode that was checked and found NOT serviceable. Do not waitlist now."}
-        r = httpx.post(f"{API}/waitlist", json=kw).json()
+    def waitlist(self):
+        business.waitlist(business.Waitlist(name=self.name, phone=self.phone, pincode=self.pincode))
         log(self.call_id, "waitlisted")
-        return r
+        self.stage = "complete"
+        return "You are on our waitlist. A team member will contact you when service reaches your area. Thank you."
 
-def fn(name, desc, props):
-    return {"type": "function", "function": {"name": name, "description": desc,
-            "parameters": {"type": "object", "properties": {k: {"type": "string"} for k in props},
-                           "required": props}}}
-
-SCHEMAS = [
-    fn("check_serviceability", "Check a 6-digit pincode the caller has actually spoken. Never guess a pincode.", ["pincode"]),
-    fn("get_slots", "Get available slots for a serviceable pincode and date (YYYY-MM-DD)", ["pincode", "date"]),
-    fn("book_appointment", "Book the appointment after the caller confirms",
-       ["name", "phone", "service", "pincode", "address", "date", "time"]),
-    fn("join_waitlist", "Add caller to waitlist ONLY if the pincode was checked and is not serviceable", ["name", "phone", "pincode"]),
-]
-
-def agent_turn(s):
-    for _ in range(6):
-        s.messages[0]["content"] = s.base_system + "\n\nCURRENT STATE: " + s.state_hint()
-        r = httpx.post(LLM, timeout=180, json={"model": MODEL, "messages": s.messages,
-                       "tools": SCHEMAS, "max_tokens": 150}).json()
-        msg = r["choices"][0]["message"]
-        s.messages.append(msg)
-        if msg.get("tool_calls"):
-            for tc in msg["tool_calls"]:
-                name = tc["function"]["name"]
-                args = json.loads(tc["function"]["arguments"])
-                print(f"[tool] {name}({args})")
+    def reply(self, raw):
+        """Capture one field and ask one fixed next question: no bundled prompts."""
+        text = raw.strip()
+        lower = text.lower()
+        if any(word in lower for word in ("human", "representative", "agent")):
+            self.stage = "complete"
+            return "A team member will call you back. Thank you for calling ClearView."
+        if self.stage == "complete":
+            return "This call has ended. Please start a new call if you need help."
+        if self.stage == "service":
+            text = interpret("service: home eye test or frame trial", text)
+            lower = text.lower()
+            if "frame" in lower or "trial" in lower:
+                self.service = "frame trial"
+            elif "eye" in lower or "test" in lower or "checkup" in lower:
+                self.service = "home eye test"
+            else:
+                return self.ask()
+            self.stage = "pincode"
+            return self.ask()
+        if self.stage == "pincode":
+            candidate = digits(text)
+            if len(candidate) != 6:
+                return "I need a 6-digit pincode. Please say it one digit at a time."
+            self.pincode, self.stage = candidate, "pincode_confirm"
+            return self.ask()
+        if self.stage == "pincode_confirm":
+            if lower in {"yes", "yeah", "yep", "correct", "right"}:
                 try:
-                    result = getattr(s, name)(**args)
-                except Exception as e:
-                    result = {"error": f"Tool call failed: {e}. Check the arguments and try again."}
-                print(f"[result] {result}")
-                s.messages.append({"role": "tool", "tool_call_id": tc["id"],
-                                   "content": json.dumps(result)})
-            continue
-        return msg["content"] or "Sorry, could you say that again?"
-    return "Sorry, could you repeat that?"
+                    result = business.serviceability(self.pincode)
+                except Exception:
+                    return "I cannot check serviceability right now. Please try again shortly."
+                log(self.call_id, "pincode_captured")
+                if result.get("serviceable"):
+                    self.city, self.area, self.stage = result["city"], result["area"], "address"
+                    log(self.call_id, "serviceable")
+                    return f"Yes, we serve {self.area}, {self.city}. {self.ask()}"
+                self.stage = "waitlist_offer"
+                return "Sorry, we do not serve that area yet. " + self.ask()
+            if lower in {"no", "nope", "wrong", "incorrect"}:
+                self.pincode, self.stage = None, "pincode"
+                return self.ask()
+            return "Please say yes if the pincode is correct, or no to enter it again."
+        if self.stage == "address":
+            text = interpret("house or flat number and landmark", text)
+            if len(text) < 5:
+                return self.ask()
+            self.address, self.stage = text, "date"
+            return self.ask()
+        if self.stage == "date":
+            parsed = parse_date(interpret("preferred appointment date", text))
+            if not parsed:
+                return "Please say today, tomorrow, a weekday, or the date as YYYY-MM-DD."
+            self.booking_date = parsed
+            try:
+                return self.offer_slots()
+            except Exception:
+                return "I cannot check slots right now. Please try again shortly."
+        if self.stage == "waitlist_offer":
+            if lower in {"yes", "yeah", "yep", "sure", "okay", "ok"}:
+                self.stage = "waitlist_name"
+                return self.ask()
+            if lower in {"no", "nope", "not now"}:
+                self.stage = "complete"
+                return "No problem. Thank you for calling ClearView."
+            return self.ask()
+        if self.stage == "slot":
+            compact = lower.replace(" ", "")
+            self.time = next((s["time"] for s in self.slots if s["time"] in text or s["time"].split(":")[0] + "pm" in compact or s["time"].split(":")[0] + "am" in compact), None)
+            if not self.time:
+                return "Please choose one of the times I offered."
+            self.stage = "name"
+            return self.ask()
+        if self.stage in {"name", "waitlist_name"}:
+            text = interpret("customer name", text)
+            if len(text) < 2 or digits(text) == text:
+                return self.ask()
+            self.name = text
+            self.stage = "phone" if self.stage == "name" else "waitlist_phone"
+            return self.ask()
+        if self.stage in {"phone", "waitlist_phone"}:
+            self.phone = digits(text)
+            if len(self.phone) != 10:
+                return "I need a 10-digit mobile number. Please say it again."
+            if self.stage == "waitlist_phone":
+                try:
+                    return self.waitlist()
+                except Exception:
+                    return "I cannot save the waitlist request right now. Please try again shortly."
+            self.stage = "confirm"
+            return f"To confirm: {self.service} at {self.address}, {self.area}, {self.city}, on {self.booking_date} at {self.time}, for {self.name}. {self.ask()}"
+        if self.stage == "confirm":
+            if lower in {"yes", "yeah", "yep", "confirm", "correct"}:
+                try:
+                    return self.book()
+                except Exception:
+                    return "I could not complete the booking. Shall I try again?"
+            if lower in {"no", "nope", "change"}:
+                self.stage = "date"
+                return "No problem. Which date would you prefer instead?"
+            return self.ask()
+        return self.ask()
+
 
 class ChatIn(BaseModel):
     session_id: str
     text: str
 
+
 @app.post("/start")
 def start():
-    s = Session()
-    sessions[s.call_id] = s
-    return {"session_id": s.call_id, "reply": agent_turn(s)}
+    session = Session()
+    sessions[session.call_id] = session
+    greeting = "Hi, this is Charlie from ClearView At-Home. This is an AI demo call and may be recorded. "
+    return {"session_id": session.call_id, "reply": greeting + session.ask()}
+
 
 @app.post("/chat")
-def chat(c: ChatIn):
-    s = sessions.get(c.session_id)
-    if not s:
-        return {"reply": "This call has ended. Please start a new one."}
-    s.spoken.append(digits(c.text))
-    t = c.text.lower()
-    if s.service is None:
-        if "frame" in t or "trial" in t:
-            s.service = "frame trial"
-        elif "eye" in t or "test" in t or "checkup" in t:
-            s.service = "home eye test"
-    s.messages.append({"role": "user", "content": c.text})
-    try:
-        return {"reply": agent_turn(s)}
-    except Exception:
-        traceback.print_exc()
-        return {"reply": "Sorry, I had a technical glitch. Could you repeat that?"}
+def chat(payload: ChatIn):
+    session = sessions.get(payload.session_id)
+    return {"reply": session.reply(payload.text) if session else "This call has ended. Please start a new one."}
+
 
 @app.get("/")
 def index():
     return FileResponse("agent/index.html")
+
 
 @app.get("/phone")
 def phone():
