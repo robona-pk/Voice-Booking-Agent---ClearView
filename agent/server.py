@@ -154,6 +154,19 @@ def slot_intent(text, slots):
     return result if isinstance(result, dict) else {}
 
 
+def confirmation_intent(text):
+    """Interpret approval naturally, while booking itself remains code-controlled."""
+    prompt = (
+        "Classify this response to an appointment booking summary as exactly one of: "
+        "confirm, change, or unclear. Treat ordinary approval, including 'ok', 'okay', "
+        "'ook', 'go ahead', and 'please proceed', as confirm. Return JSON only: "
+        "{\"intent\": \"confirm|change|unclear\"}. "
+        f"Customer reply: {text!r}"
+    )
+    result = model_json("You classify booking-confirmation intent.", prompt, 40)
+    return result.get("intent") if isinstance(result, dict) else None
+
+
 class Session:
     QUESTIONS = {
         "service": "Would you like a home eye test or a frame trial?",
@@ -340,12 +353,14 @@ class Session:
             return (f"To confirm: {self.service} at {self.address}, {self.area}, {self.city}, on {self.booking_date} at {self.time}, for {self.name}. "
                     "Say confirm, or say change address, pincode, date, or slot.")
         if self.stage == "confirm":
-            if lower in {"yes", "yeah", "yep", "confirm", "correct"}:
+            semantic = confirmation_intent(text)
+            approved = {"yes", "yeah", "yep", "confirm", "correct", "ok", "okay", "ook", "go ahead", "please proceed"}
+            if semantic == "confirm" or lower in approved:
                 try:
                     return self.book()
                 except Exception:
                     return "I could not complete the booking. Shall I try again?"
-            if lower in {"no", "nope", "change"}:
+            if semantic == "change" or lower in {"no", "nope", "change"}:
                 self.stage = "date"
                 return "No problem. Which date would you prefer instead?"
             return self.ask()
