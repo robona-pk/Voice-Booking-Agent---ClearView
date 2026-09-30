@@ -3,6 +3,7 @@ import json
 import os
 import re
 import uuid
+from difflib import get_close_matches
 from datetime import date, timedelta
 
 import httpx
@@ -44,6 +45,15 @@ def parse_date(text):
     months = {"january": 1, "february": 2, "march": 3, "april": 4,
               "may": 5, "june": 6, "july": 7, "august": 8,
               "september": 9, "october": 10, "november": 11, "december": 12}
+    # Speech recognition commonly produces near-miss month names such as
+    # "ocotber". Correct only a close match to one of the twelve months.
+    words = re.findall(r"[a-z]+", text)
+    for word in words:
+        if len(word) < 3:
+            continue
+        match = get_close_matches(word, months.keys(), n=1, cutoff=0.78)
+        if match and word != match[0]:
+            text = re.sub(rf"\b{re.escape(word)}\b", match[0], text)
     # Accept ordinary spoken formats: "1st October", "October 2nd", and
     # optional years. This parser is a reliable fallback to the LLM extractor.
     patterns = [
@@ -73,6 +83,21 @@ def parse_date(text):
             offset = (weekday - date.today().weekday()) % 7
             return (date.today() + timedelta(days=offset or 7 if "next" in text else offset)).isoformat()
     return None
+
+
+def normalize_spoken_time(text):
+    """Turn spoken times such as '2 pm' into the slot format '14:00'."""
+    match = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b", text.lower())
+    if not match:
+        return None
+    hour, minute, period = int(match.group(1)), int(match.group(2) or 0), match.group(3)
+    if not 1 <= hour <= 12 or minute > 59:
+        return None
+    if period == "pm" and hour != 12:
+        hour += 12
+    if period == "am" and hour == 12:
+        hour = 0
+    return f"{hour:02d}:{minute:02d}"
 
 
 def interpret(field, text):
@@ -277,6 +302,8 @@ class Session:
             semantic_time = semantic.get("time") if semantic.get("intent") == "select_slot" else None
             self.time = next((s["time"] for s in self.slots if s["time"] == semantic_time), None)
             # The short fallback still works when a hosted model is unavailable.
+            spoken_time = normalize_spoken_time(text)
+            self.time = self.time or next((s["time"] for s in self.slots if s["time"] == spoken_time), None)
             self.time = self.time or next((s["time"] for s in self.slots if s["time"] in text or s["time"].split(":")[0] + "pm" in compact or s["time"].split(":")[0] + "am" in compact), None)
             if not self.time:
                 if semantic.get("intent") == "needs_another_date":
