@@ -41,6 +41,31 @@ def parse_date(text):
         return date.today().isoformat()
     if text == "tomorrow":
         return (date.today() + timedelta(days=1)).isoformat()
+    months = {"january": 1, "february": 2, "march": 3, "april": 4,
+              "may": 5, "june": 6, "july": 7, "august": 8,
+              "september": 9, "october": 10, "november": 11, "december": 12}
+    # Accept ordinary spoken formats: "1st October", "October 2nd", and
+    # optional years. This parser is a reliable fallback to the LLM extractor.
+    patterns = [
+        r"\b(\d{1,2})(?:st|nd|rd|th)?\s+(" + "|".join(months) + r")(?:\s*,?\s*(\d{4}))?\b",
+        r"\b(" + "|".join(months) + r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*,?\s*(\d{4}))?\b",
+    ]
+    for index, pattern in enumerate(patterns):
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        if index == 0:
+            day, month_name, year = int(match.group(1)), match.group(2), match.group(3)
+        else:
+            month_name, day, year = match.group(1), int(match.group(2)), match.group(3)
+        year = int(year) if year else date.today().year
+        try:
+            parsed = date(year, months[month_name], day)
+            if not match.group(3) and parsed < date.today():
+                parsed = date(year + 1, months[month_name], day)
+            return parsed.isoformat()
+        except ValueError:
+            return None
     days = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
             "friday": 4, "saturday": 5, "sunday": 6}
     for label, weekday in days.items():
@@ -183,9 +208,11 @@ class Session:
             self.address, self.stage = text, "date"
             return self.ask()
         if self.stage == "date":
-            parsed = parse_date(interpret("preferred appointment date", text))
+            # Use the raw phrase too, because an LLM extractor may return a
+            # non-date string even when the caller said a valid calendar date.
+            parsed = parse_date(interpret("preferred appointment date", text)) or parse_date(text)
             if not parsed:
-                return "Please say today, tomorrow, a weekday, or the date as YYYY-MM-DD."
+                return "Please say a date such as 1st October, tomorrow, a weekday, or YYYY-MM-DD."
             self.booking_date = parsed
             try:
                 return self.offer_slots()
